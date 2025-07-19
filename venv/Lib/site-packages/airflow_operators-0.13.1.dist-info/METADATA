@@ -1,0 +1,41 @@
+Metadata-Version: 2.1
+Name: airflow-operators
+Version: 0.13.1
+Summary: Custom operators for Apache Airflow
+License: MIT
+Author: Anonymous
+Requires-Python: >=3.10,<3.13
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Dist: apache-airflow (<3.0.0)
+Requires-Dist: apache-airflow-providers-apache-kafka (>=1.10.0,<2.0.0)
+Requires-Dist: apache-airflow-providers-elasticsearch (>=6.3.1,<7.0.0)
+Requires-Dist: apache-airflow-providers-mongo (>=5.2.1,<6.0.0)
+Requires-Dist: apache-airflow-providers-mysql (>=6.3.2,<7.0.0)
+Requires-Dist: apache-airflow-providers-redis (>=4.1.1,<5.0.0)
+Description-Content-Type: text/markdown
+
+# airflow-operators
+
+Custom operators for Apache Airflow
+
+## Installation
+
+> It is assumed that `Apache Airflow` is installed. It is not added to the dependencies for some reason.
+
+> The `mysqlclient` dependency is used. If it is not installed, there may be errors during installation. 
+> Install it explicitly using the [documentation](https://pypi.org/project/mysqlclient/).
+
+## List of operators
+
+### Kafka
+
+- CustomConsumeFromTopicOperator
+- ConsumeMessageDataOperator
+
+### SQLAlchemy
+
+- SQLAlchemySessionOperator

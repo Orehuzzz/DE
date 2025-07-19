@@ -27,19 +27,23 @@ x-airflow-common:
 
 services:
   postgres:
-    image: postgres:17
+    image: postgres:13
     container_name: postgres
+    ports:
+    - "5432:5432"
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     volumes:
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 5s
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
       retries: 5
     restart: always
+
 
   redis:
     image: redis:latest
