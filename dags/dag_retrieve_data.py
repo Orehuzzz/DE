@@ -14,17 +14,17 @@ default_args = {
 }
 
 #Можно через airflow.decorators import task ?
-def retrieving_csv(**context):
+def take_csv(**context):
     csv_file = pd.read_csv('./dags/comments.csv', sep=';')
     context['ti'].xcom_push(key='csv_file', value=csv_file)
     return(csv_file)
 
-def retrieving_xlsx(**context):
+def take_xlsx(**context):
     xlsx_file = pd.read_excel('./dags/users.xlsx')
     context['ti'].xcom_push(key='xlsx_file', value=xlsx_file)
     return(xlsx_file)
 
-def get_api(**context):
+def take_api(**context):
     api_data = requests.get('https://jsonplaceholder.typicode.com/posts')
     df = pd.DataFrame(api_data.json())
     context['ti'].xcom_push(key='api', value=api_data)
@@ -36,20 +36,18 @@ with DAG('retrieve_data', default_args=default_args, schedule_interval='@daily',
     with TaskGroup('data_preparation') as prep_group:
 
         csv_task = PythonOperator(
-            task_id='give_csv',
-            python_callable=retrieving_csv,
+            task_id='take_csv',
+            python_callable=take_csv,
         )
 
         xlsx_task = PythonOperator(
-            task_id='give_xlsx',
-            python_callable=retrieving_xlsx,
+            task_id='take_xlsx',
+            python_callable=take_xlsx,
         )
 
         api_task = PythonOperator(
-            task_id='give_api_data',
-            python_callable=get_api
+            task_id='take_api_data',
+            python_callable=take_api
         )
 
     
-
-
