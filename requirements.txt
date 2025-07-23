@@ -3,3 +3,5 @@ apache-airflow-providers-amazon
 psycopg2-binary==2.9.10
 pandas
 methodtools
+openpyxl
+requests 

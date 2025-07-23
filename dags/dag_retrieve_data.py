@@ -18,8 +18,6 @@ def take_csv(**context):
     context['ti'].xcom_push(key='csv_file', value=csv_file)
     return(csv_file)
 
-
-
 def take_xlsx(**context):
     xlsx_file = pd.read_excel('./dags/users.xlsx')
     context['ti'].xcom_push(key='xlsx_file', value=xlsx_file)

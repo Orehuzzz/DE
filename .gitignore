@@ -1,3 +1,5 @@
-custom_postgres_data/
-minio_data/
+data/custom_postgres_data/
+data/minio_data/
+__pycache__/
 *.pyc
+logs/scheduler/
