@@ -4,6 +4,12 @@ from airflow.operators.python import PythonOperator
 from airflow.utils.task_group import TaskGroup
 import pandas as pd
 import requests
+import boto3
+from io import BytesIO
+import pyarrow as pa
+import pyarrow.parquet as pq
+import awswrangler as wr
+import pg8000
 
 
 
@@ -32,8 +38,7 @@ def take_api(**context):
 
 def union_data(**context):
     ti = context['ti']
-
-
+    
     df_csv = pd.DataFrame(ti.xcom_pull(task_ids='data_preparation.take_csv', key='csv_file'))
     df_xlsx = pd.DataFrame(ti.xcom_pull(task_ids='data_preparation.take_xlsx', key='xlsx_file'))
     df_api = pd.DataFrame(ti.xcom_pull(task_ids='data_preparation.take_api_data', key='api_file'))
@@ -77,6 +82,74 @@ def union_data(**context):
 
     return union_data
 
+def push_to_minio(**context):
+    ti = context['ti']
+    df_dict = ti.xcom_pull(task_ids='data_preparation.union_all_data', key='union_data')
+    df = pd.DataFrame(df_dict)
+
+    table = pa.Table.from_pandas(df)
+    buffer = BytesIO()
+    pq.write_table(table, buffer)
+    buffer.seek(0)
+
+    minio_client = boto3.client(
+        's3',
+        endpoint_url='http://minio:9000',  # имя контейнера + порт
+        aws_access_key_id='minio-root',
+        aws_secret_access_key='minio-root',
+        region_name='us-east-1'
+    )
+
+    bucket_name = 'airflow-data'
+    object_key = 'union_data/final_data.parquet'
+
+    existing_buckets = [b['Name'] for b in minio_client.list_buckets()['Buckets']]
+    if bucket_name not in existing_buckets:
+        minio_client.create_bucket(Bucket=bucket_name)
+
+
+    minio_client.upload_fileobj(buffer, bucket_name, object_key)
+    print(f"File uploaded to MinIO: s3://{bucket_name}/{object_key}")
+
+def insert_to_postgres(**context):
+
+    minio_client = boto3.client(
+        's3',
+        endpoint_url='http://minio:9000',
+        aws_access_key_id='minio-root',
+        aws_secret_access_key='minio-root',
+        region_name='us-east-1'
+    )
+
+    bucket_name = 'airflow-data'
+    object_key = 'union_data/final_data.parquet'
+
+    
+    buffer = BytesIO()
+    minio_client.download_fileobj(bucket_name, object_key, buffer)
+    buffer.seek(0)
+
+    df = pd.read_parquet(buffer)
+
+    conn = pg8000.connect(
+        user="airflow",
+        password="airflow",
+        host="postgres",
+        port=5432,
+        database="airflow"
+    )
+
+    
+    wr.postgresql.to_sql(
+        df=df,
+        con=conn,
+        schema='airflow_data',
+        table='final_data',
+        mode='overwrite', 
+        index=False
+    )
+
+    print(wr.postgresql)
 
 with DAG('retrieve_data', default_args=default_args, schedule_interval='@daily', catchup=False, 
            tags=['dag_retrieves_data', 'first_ex']) as dag:
@@ -105,4 +178,16 @@ with DAG('retrieve_data', default_args=default_args, schedule_interval='@daily',
 
         [csv_task, xlsx_task, api_task] >> union_task
 
-    
+push_task = PythonOperator(
+    task_id='push_to_minio',
+    python_callable=push_to_minio
+)
+
+insert_to_pg = PythonOperator(
+    task_id='insert_to_pg',
+    python_callable=insert_to_postgres
+)
+
+union_task >> push_task >> insert_to_pg
+
+       
