@@ -2,6 +2,7 @@ from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.task_group import TaskGroup
+from airflow.hooks.base_hook import BaseHook
 import pandas as pd
 import requests
 import boto3
@@ -131,11 +132,13 @@ def insert_to_postgres(**context):
 
     df = pd.read_parquet(buffer)
 
+    conn_data = BaseHook.get_connection("postgres")
+
     conn = pg8000.connect(
-        user="airflow",
-        password="airflow",
-        host="postgres",
-        port=5432,
+        user=conn_data.login,
+        password=conn_data.password,
+        host=conn_data.host,
+        port=int(conn_data.port),
         database="airflow"
     )
 
