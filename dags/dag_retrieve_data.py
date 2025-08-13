@@ -3,6 +3,11 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.hooks.base_hook import BaseHook
+from airflow.models import Variable
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import Column, Integer, Float, String, DATE
+from sqlalchemy.orm import declarative_base
 import pandas as pd
 import requests
 import boto3
@@ -43,9 +48,6 @@ def union_data(**context):
     df_csv = pd.DataFrame(ti.xcom_pull(task_ids='data_preparation.take_csv', key='csv_file'))
     df_xlsx = pd.DataFrame(ti.xcom_pull(task_ids='data_preparation.take_xlsx', key='xlsx_file'))
     df_api = pd.DataFrame(ti.xcom_pull(task_ids='data_preparation.take_api_data', key='api_file'))
-
-    print("Columns in df_xlsx:", df_xlsx.columns.tolist())
-
 
     df_xlsx.rename(columns={'id':'userId'}, inplace=True)
     df_xlsx['name'] = df_xlsx['name'].str.replace('Mrs. ', '', regex=False)
@@ -93,15 +95,17 @@ def push_to_minio(**context):
     pq.write_table(table, buffer)
     buffer.seek(0)
 
+    conn = BaseHook.get_connection("minio_aws")
+
     minio_client = boto3.client(
         's3',
         endpoint_url='http://minio:9000',  # имя контейнера + порт
-        aws_access_key_id='minio-root',
-        aws_secret_access_key='minio-root',
-        region_name='us-east-1'
+        aws_access_key_id=conn.login,
+        aws_secret_access_key=conn.password,
+        region_name=conn.extra_dejson.get('region_name', 'us-east-1') 
     )
 
-    bucket_name = 'airflow-data'
+    bucket_name = Variable.get('bucket_name')
     object_key = 'union_data/final_data.parquet'
 
     existing_buckets = [b['Name'] for b in minio_client.list_buckets()['Buckets']]
@@ -114,15 +118,17 @@ def push_to_minio(**context):
 
 def insert_to_postgres(**context):
 
+    conn = BaseHook.get_connection("minio_aws")
+
     minio_client = boto3.client(
         's3',
         endpoint_url='http://minio:9000',
-        aws_access_key_id='minio-root',
-        aws_secret_access_key='minio-root',
-        region_name='us-east-1'
+        aws_access_key_id=conn.login,
+        aws_secret_access_key=conn.password,
+        region_name=conn.extra_dejson.get('region_name', 'us-east-1') 
     )
 
-    bucket_name = 'airflow-data'
+    bucket_name = Variable.get('bucket_name')
     object_key = 'union_data/final_data.parquet'
 
     
@@ -133,6 +139,7 @@ def insert_to_postgres(**context):
     df = pd.read_parquet(buffer)
 
     conn_data = BaseHook.get_connection("postgres")
+    conn_str = f"postgresql+pg8000://{conn_data.login}:{conn_data.password}@{conn_data.host}:{conn_data.port}/airflow"
 
     conn = pg8000.connect(
         user=conn_data.login,
@@ -152,7 +159,47 @@ def insert_to_postgres(**context):
         index=False
     )
 
-    print(wr.postgresql)
+    Base = declarative_base()
+
+    class UserData(Base):
+        __tablename__="user_data"
+        __table_args__ = {"schema": "airflow_data"}
+        id = Column(Integer, nullable=False, unique=True, primary_key=True, autoincrement=False)
+        name = Column(String)
+        surname = Column(String)
+        username = Column(String)
+        email = Column(String)
+        company_address = Column(String)
+        phone = Column(String)
+        website = Column(String)
+        company_name = Column(String)
+        content_of_comment = Column(String)
+
+    engine = create_engine(conn_str)
+
+    Base.metadata.create_all(bind=engine)
+
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    session_local = SessionLocal()
+
+    for _, row in df.iterrows():
+        new_record = UserData(
+            id=row['id'],
+            name=row['name'],
+            surname=row['surname'],
+            username=row['username'],
+            email=row['email'],
+            company_address=row['company_address'],
+            phone=row['phone'],
+            website=row['website'],
+            company_name=row['company_name'],
+            content_of_comment=row['content_of_comment']
+        )
+
+        session_local.add(new_record)
+    session_local.commit()
+    
+    
 
 with DAG('retrieve_data', default_args=default_args, schedule_interval='@daily', catchup=False, 
            tags=['dag_retrieves_data', 'first_ex']) as dag:
