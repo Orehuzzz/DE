@@ -1,10 +1,15 @@
 from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.hooks.base_hook import BaseHook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.models import Variable
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import create_engine
+from sqlalchemy import text
+from sqlalchemy import func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import Column, Integer, Float, String, DATE
 from sqlalchemy.orm import declarative_base
@@ -84,7 +89,7 @@ def union_data(**context):
     ti.xcom_push(key='union_data', value=union_data.to_dict())
 
     return union_data
-
+    
 def push_to_minio(**context):
     ti = context['ti']
     df_dict = ti.xcom_pull(task_ids='data_preparation.union_all_data', key='union_data')
@@ -96,17 +101,18 @@ def push_to_minio(**context):
     buffer.seek(0)
 
     conn = BaseHook.get_connection("minio_aws")
-
     minio_client = boto3.client(
         's3',
-        endpoint_url='http://minio:9000',  # имя контейнера + порт
+        endpoint_url='http://minio:9000',  
         aws_access_key_id=conn.login,
         aws_secret_access_key=conn.password,
         region_name=conn.extra_dejson.get('region_name', 'us-east-1') 
     )
 
+    #создаём уникальное имя файла 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     bucket_name = Variable.get('bucket_name')
-    object_key = 'union_data/final_data.parquet'
+    object_key = f'union_data/final_data_{timestamp}.parquet'
 
     existing_buckets = [b['Name'] for b in minio_client.list_buckets()['Buckets']]
     if bucket_name not in existing_buckets:
@@ -114,7 +120,9 @@ def push_to_minio(**context):
 
 
     minio_client.upload_fileobj(buffer, bucket_name, object_key)
-    print(f"File uploaded to MinIO: s3://{bucket_name}/{object_key}")
+    print(f"File uploaded to MinIO: s3://{bucket_name}/{object_key}") #проверяем местоположение
+
+
 
 def insert_to_postgres(**context):
 
@@ -137,6 +145,7 @@ def insert_to_postgres(**context):
     buffer.seek(0)
 
     df = pd.read_parquet(buffer)
+    df = df.drop_duplicates(subset=['id'])
 
     conn_data = BaseHook.get_connection("postgres")
     conn_str = f"postgresql+pg8000://{conn_data.login}:{conn_data.password}@{conn_data.host}:{conn_data.port}/airflow"
@@ -155,16 +164,19 @@ def insert_to_postgres(**context):
         con=conn,
         schema='airflow_data',
         table='final_data',
-        mode='overwrite', 
+        mode='append', 
         index=False
     )
 
+    engine = create_engine(conn_str)
     Base = declarative_base()
 
     class UserData(Base):
-        __tablename__="user_data"
+        __tablename__ = "user_data"
         __table_args__ = {"schema": "airflow_data"}
-        id = Column(Integer, nullable=False, unique=True, primary_key=True, autoincrement=False)
+
+        dwh_id = Column(Integer, nullable=False, primary_key=True, autoincrement=True) #НЕ ПОНИМАЮ КАК ПРИ ВСТАВКЕ ДАННЫХ - ОСТАВЛЯТЬ ОДИН dwh_id
+        id = Column(Integer, nullable=False, unique=True)
         name = Column(String)
         surname = Column(String)
         username = Column(String)
@@ -175,31 +187,40 @@ def insert_to_postgres(**context):
         company_name = Column(String)
         content_of_comment = Column(String)
 
-    engine = create_engine(conn_str)
-
+    
     Base.metadata.create_all(bind=engine)
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session_local = SessionLocal()
 
-    for _, row in df.iterrows():
-        new_record = UserData(
-            id=row['id'],
-            name=row['name'],
-            surname=row['surname'],
-            username=row['username'],
-            email=row['email'],
-            company_address=row['company_address'],
-            phone=row['phone'],
-            website=row['website'],
-            company_name=row['company_name'],
-            content_of_comment=row['content_of_comment']
-        )
 
-        session_local.add(new_record)
+    with engine.begin() as conn:
+        for _, row in df.iterrows():
+            stmt = insert(UserData).values(
+                id=row['id'],
+                name=row['name'],
+                surname=row['surname'],
+                username=row['username'],
+                email=row['email'],
+                company_address=row['company_address'],
+                phone=row['phone'],
+                website=row['website'],
+                company_name=row['company_name'],
+                content_of_comment=row['content_of_comment']
+            ).on_conflict_do_nothing(index_elements=['id'])  # skip duplicates
+
+            conn.execute(stmt)
+
     session_local.commit()
-    
-    
+
+def log_union_data():
+    hook = PostgresHook(postgres_conn_id="postgres")
+    conn = hook.get_conn()
+
+    df = pd.read_sql('SELECT * FROM airflow_data.user_data', conn)
+
+    print(df.head(5).to_string(index=False))
+
 
 with DAG('retrieve_data', default_args=default_args, schedule_interval='@daily', catchup=False, 
            tags=['dag_retrieves_data', 'first_ex']) as dag:
@@ -238,6 +259,23 @@ insert_to_pg = PythonOperator(
     python_callable=insert_to_postgres
 )
 
-union_task >> push_task >> insert_to_pg
+new_phone = Variable.get('new_phone_number')
+
+update_phone_task = PostgresOperator(
+    task_id='update_ph_num',
+    postgres_conn_id='postgres',
+    sql=f"""
+        UPDATE airflow_data.user_data
+        SET phone = '{new_phone}'
+        WHERE email = 'Shanna@melissa.tv'
+    """
+)
+
+log_data = PythonOperator(
+    task_id='log_union_data',
+    python_callable=log_union_data
+)
+
+union_task >> push_task >> insert_to_pg >> update_phone_task >> log_data
 
        
