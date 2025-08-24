@@ -103,10 +103,10 @@ def push_to_minio(**context):
     conn = BaseHook.get_connection("minio_aws")
     minio_client = boto3.client(
         's3',
-        endpoint_url='http://minio:9000',  
+        endpoint_url=conn.extra_dejson.get('endpoint_url'),  
         aws_access_key_id=conn.login,
         aws_secret_access_key=conn.password,
-        region_name=conn.extra_dejson.get('region_name', 'us-east-1') 
+        region_name=conn.extra_dejson.get('region_name') 
     )
 
     #создаём уникальное имя файла 
@@ -123,32 +123,9 @@ def push_to_minio(**context):
     print(f"File uploaded to MinIO: s3://{bucket_name}/{object_key}") #проверяем местоположение
 
 
-
-def insert_to_postgres(**context):
-
-    conn = BaseHook.get_connection("minio_aws")
-
-    minio_client = boto3.client(
-        's3',
-        endpoint_url='http://minio:9000',
-        aws_access_key_id=conn.login,
-        aws_secret_access_key=conn.password,
-        region_name=conn.extra_dejson.get('region_name', 'us-east-1') 
-    )
-
-    bucket_name = Variable.get('bucket_name')
-    object_key = 'union_data/final_data.parquet'
-
-    
-    buffer = BytesIO()
-    minio_client.download_fileobj(bucket_name, object_key, buffer)
-    buffer.seek(0)
-
-    df = pd.read_parquet(buffer)
-    df = df.drop_duplicates(subset=['id'])
+def create_table(**context):
 
     conn_data = BaseHook.get_connection("postgres")
-    conn_str = f"postgresql+pg8000://{conn_data.login}:{conn_data.password}@{conn_data.host}:{conn_data.port}/airflow"
 
     conn = pg8000.connect(
         user=conn_data.login,
@@ -158,60 +135,104 @@ def insert_to_postgres(**context):
         database="airflow"
     )
 
-    
-    wr.postgresql.to_sql(
-        df=df,
-        con=conn,
-        schema='airflow_data',
-        table='final_data',
-        mode='append', 
-        index=False
+    create_sql = """
+    CREATE TABLE IF NOT EXISTS airflow_data.user_data (
+        dwh_id SERIAL PRIMARY KEY,
+        id INTEGER NOT NULL UNIQUE,
+        name VARCHAR(255),
+        surname VARCHAR(255),
+        username VARCHAR(100),
+        email VARCHAR(255),
+        company_address TEXT,
+        phone VARCHAR(50),
+        website VARCHAR(255),
+        company_name VARCHAR(255),
+        content_of_comment TEXT
+    );
+    """
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(create_sql)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def load_data_from_minio(**context):
+
+    conn=BaseHook.get_connection('minio_aws')
+
+    minio_client = boto3.client(
+        's3',
+        endpoint_url=conn.extra_dejson.get('endpoint_url'),
+        aws_access_key_id=conn.login,
+        aws_secret_access_key=conn.password,
+        region_name=conn.extra_dejson.get('region_name')
     )
 
-    engine = create_engine(conn_str)
-    Base = declarative_base()
-
-    class UserData(Base):
-        __tablename__ = "user_data"
-        __table_args__ = {"schema": "airflow_data"}
-
-        dwh_id = Column(Integer, nullable=False, primary_key=True, autoincrement=True) #НЕ ПОНИМАЮ КАК ПРИ ВСТАВКЕ ДАННЫХ - ОСТАВЛЯТЬ ОДИН dwh_id
-        id = Column(Integer, nullable=False, unique=True)
-        name = Column(String)
-        surname = Column(String)
-        username = Column(String)
-        email = Column(String)
-        company_address = Column(String)
-        phone = Column(String)
-        website = Column(String)
-        company_name = Column(String)
-        content_of_comment = Column(String)
-
+    bucket_name = Variable.get('bucket_name')
+    object_key = 'union_data/final_data.parquet'
     
-    Base.metadata.create_all(bind=engine)
+    buffer = BytesIO()
+    minio_client.download_fileobj(bucket_name, object_key, buffer)
+    buffer.seek(0)
 
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    session_local = SessionLocal()
+    df = pd.read_parquet(buffer)
+    df = df.drop_duplicates(subset=['id'])
+    
+    context['ti'].xcom_push(key='minio_data', value=df.to_dict(orient='records'))
 
+def insert_data_to_postgres(**context):
+    ti = context['ti']
+    df_dict = ti.xcom_pull(task_ids='load_data_from_minio', key = 'minio_data')
+    df = pd.DataFrame(df_dict)
 
-    with engine.begin() as conn:
+    conn_data = BaseHook.get_connection('postgres')
+
+    conn = pg8000.connect(
+        user=conn_data.login,
+        password=conn_data.password,
+        host=conn_data.host,
+        port=int(conn_data.port),
+        database='airflow'
+    )
+
+    try:
+        cursor = conn.cursor()
         for _, row in df.iterrows():
-            stmt = insert(UserData).values(
-                id=row['id'],
-                name=row['name'],
-                surname=row['surname'],
-                username=row['username'],
-                email=row['email'],
-                company_address=row['company_address'],
-                phone=row['phone'],
-                website=row['website'],
-                company_name=row['company_name'],
-                content_of_comment=row['content_of_comment']
-            ).on_conflict_do_nothing(index_elements=['id'])  # skip duplicates
-
-            conn.execute(stmt)
-
-    session_local.commit()
+            insert_sql = """
+            INSERT INTO airflow_data.user_data 
+            (id, name, surname, username, email, company_address, phone, website, company_name, content_of_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """
+            
+            cursor.execute(insert_sql, (
+                int(row['id']),
+                str(row['name']),
+                str(row['surname']),
+                str(row['username']),
+                str(row['email']),
+                str(row['company_address']),
+                str(row['phone']),
+                str(row['website']),
+                str(row['company_name']),
+                str(row['content_of_comment'])
+            ))
+        
+        conn.commit()
+        print(f"Успешно вставлено {len(df)} записей")
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"Ошибка при вставке данных: {str(e)}")
+        raise
+    finally:
+        conn.close()
 
 def log_union_data():
     hook = PostgresHook(postgres_conn_id="postgres")
@@ -254,9 +275,20 @@ push_task = PythonOperator(
     python_callable=push_to_minio
 )
 
-insert_to_pg = PythonOperator(
-    task_id='insert_to_pg',
-    python_callable=insert_to_postgres
+create_table_task = PythonOperator(
+    task_id = 'create_data_table',
+    python_callable=create_table,
+)
+
+
+load_data_from_min = PythonOperator(
+    task_id='load_data_from_minio',
+    python_callable=load_data_from_minio
+)
+
+insert_data_task = PythonOperator(
+    task_id='insert_data_to_postgres',
+    python_callable=insert_data_to_postgres,
 )
 
 new_phone = Variable.get('new_phone_number')
@@ -276,6 +308,6 @@ log_data = PythonOperator(
     python_callable=log_union_data
 )
 
-union_task >> push_task >> insert_to_pg >> update_phone_task >> log_data
+union_task >> push_task >> create_table_task >> load_data_from_min >> insert_data_task >> update_phone_task >> log_data
 
        
