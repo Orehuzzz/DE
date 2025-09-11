@@ -53,7 +53,7 @@ services:
       retries: 5
 
   custom_postgres:
-    image: postgres:16
+    image: postgres:16.9
     container_name: custom_postgres
     environment:
       - POSTGRES_USER=admin
@@ -73,6 +73,7 @@ services:
   minio:
     image: 'bitnami/minio:latest'
     container_name: minio
+    user: "1001"
     ports:
       - "9000:9000" # API
       - "9001:9001" # Console
