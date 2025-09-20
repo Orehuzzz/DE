@@ -71,27 +71,24 @@ services:
       retries: 5
 
   clickhouse:
-    image: clickhouse/clickhouse-server:23.8
-    container_name: clickhouse
-    restart: always
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse-server
     ports:
-      - "8123:8123"   
-      - "9003:9003"   
-    volumes:
-      - ./clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse_logs:/var/log/clickhouse
+      - "9000:9000"
+      - "8123:8123"
     environment:
-      - CLICKHOUSE_DB=mydb
-      - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASSWORD=secret
-
+      CLICKHOUSE_USER: main_user
+      CLICKHOUSE_PASSWORD: qwerty
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
 
   minio:
     image: 'bitnami/minio:latest'
     container_name: minio
     user: "1001"
     ports:
-      - "9000:9000" # API
+      - "9005:9005" # API
       - "9001:9001" # Console
     environment:
       - MINIO_ROOT_USER=minio-root
@@ -209,5 +206,5 @@ services:
     depends_on:
       <<: *airflow-common-depends-on
 
-# volumes:
-#   postgres-db-volume:
+volumes:
+  clickhouse_data:
