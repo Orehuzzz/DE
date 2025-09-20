@@ -70,6 +70,22 @@ services:
       timeout: 5s
       retries: 5
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    restart: always
+    ports:
+      - "8123:8123"   
+      - "9003:9003"   
+    volumes:
+      - ./clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse_logs:/var/log/clickhouse
+    environment:
+      - CLICKHOUSE_DB=mydb
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=secret
+
+
   minio:
     image: 'bitnami/minio:latest'
     container_name: minio
